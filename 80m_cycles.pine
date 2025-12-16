@@ -1,0 +1,202 @@
+//@version=6
+indicator("80m Cycles", overlay = true, max_boxes_count = 500, max_lines_count = 500)
+
+// ── INPUTS ─────────────────────────────────────
+grp_time   = "Time Settings (EST)"
+tz         = "America/New_York"
+startH     = input.int(7,  "Session Start Hour", group = grp_time)
+startM     = input.int(0,  "Session Start Minute", group = grp_time)
+endH       = input.int(16, "Session End Hour",   group = grp_time)
+endM       = input.int(0,  "Session End Minute",   group = grp_time)
+
+grp_visual = "Visual Settings (Minimalist)"
+colSession = input.color(color.new(color.gray,   97), "Full Session Back", group = grp_visual)
+col80m     = input.color(color.new(color.gray,   92), "80min Cycle Box",   group = grp_visual)
+// Color fix: Using color.rgb for a specific subdued shade
+col40m     = input.color(color.new(color.rgb(100, 140, 160), 88), "1st 40min Shade",   group = grp_visual)
+borderCol  = input.color(color.new(color.gray,   70), "Borders",           group = grp_visual)
+
+grp_lines  = "Opening Lines"
+drawLines  = input.bool(true, "Draw Open Price Lines?", group = grp_lines)
+openTimesInput = input.string("07:00", "Opening Time(s) (HH:MM, comma-separated)", group = grp_lines)
+colLine    = input.color(color.gray, "Line Color", group = grp_lines)
+
+// ── TIME CALCULATIONS ───────────────────────────
+// Define time constants for the current bar's day
+y = year(time, tz)
+m = month(time, tz)
+d = dayofmonth(time, tz)
+
+// Calculate Session Start and End Timestamps
+t_sess_start = timestamp(tz, y, m, d, startH, startM, 0)
+t_sess_end   = timestamp(tz, y, m, d, endH, endM, 0)
+
+// Define cycle constants
+ms_80      = 80 * 60 * 1000
+ms_40      = 40 * 60 * 1000
+
+// Check if current bar is within the 7am - 4pm window
+in_session_window = time >= t_sess_start and time < t_sess_end
+
+// ── CYCLE INDEX CALCULATION (PERFORMANCE BOOST) ──────────
+// i_cyc is a series variable that holds the current cycle index (0, 1, 2, ...)
+i_cyc = if in_session_window
+    ms_elapsed = time - t_sess_start
+    math.floor(ms_elapsed / ms_80)
+else
+    -1
+
+// Check if the current bar is the first bar of a new cycle
+is_new_cycle = i_cyc != i_cyc[1] and i_cyc >= 0
+
+// Current cycle times derived from the calculated index
+t_cycle_start = t_sess_start + (i_cyc * ms_80)
+t_cycle_end   = t_cycle_start + ms_80
+t_sub_end     = t_cycle_start + ms_40
+
+// ── STATE VARIABLES ─────────────────────────────
+var box b_sess = na
+var float h_sess = na, var float l_sess = na
+var box b_cyc = na      
+var box b_sub = na      
+var float h_cyc = na, var float l_cyc = na
+var float h_sub = na, var float l_sub = na
+
+// Opening lines state
+var line[] openLines = array.new_line()
+var float[] openPrices = array.new_float()
+var bool[] openActive = array.new_bool()
+var int[] openStartIdx = array.new_int()
+var int[] openHours = array.new_int()
+var int[] openMinutes = array.new_int()
+
+// ── HELPERS ─────────────────────────────────────
+parse_open_time(txt) =>
+    clean = str.replace_all(txt, " ", "")
+    parts = str.split(clean, ":")
+    has_two_parts = array.size(parts) == 2
+    h_raw = has_two_parts ? str.tonumber(array.get(parts, 0)) : na
+    m_raw = has_two_parts ? str.tonumber(array.get(parts, 1)) : na
+    h_int = not na(h_raw) ? int(math.round(h_raw)) : na
+    m_int = not na(m_raw) ? int(math.round(m_raw)) : na
+    is_valid = has_two_parts and not na(h_int) and not na(m_int) and h_int >= 0 and h_int < 24 and m_int >= 0 and m_int < 60
+    [is_valid ? h_int : na, is_valid ? m_int : na]
+
+init_open_times() =>
+    array.clear(openHours)
+    array.clear(openMinutes)
+    parts = str.split(openTimesInput, ",")
+    for i = 0 to array.size(parts) - 1
+        part = array.get(parts, i)
+        [h, m_] = parse_open_time(part)
+        if not na(h) and not na(m_)
+            array.push(openHours, h)
+            array.push(openMinutes, m_)
+
+reset_open_lines() =>
+    for i = 0 to array.size(openLines) - 1
+        line.delete(array.get(openLines, i))
+    array.clear(openLines)
+    array.clear(openPrices)
+    array.clear(openActive)
+    array.clear(openStartIdx)
+
+// Initialize configured opening times once on load
+if barstate.isfirst
+    init_open_times()
+
+// ── EXECUTION ───────────────────────────────────
+
+// 1. SESSION MANAGEMENT 
+is_start_of_day = time >= t_sess_start and time[1] < t_sess_start
+
+if is_start_of_day
+    h_sess := high
+    l_sess := low
+    
+    // Create the big background box 
+    b_sess := box.new(t_sess_start, high, t_sess_end, low, xloc=xloc.bar_time, border_color=na, bgcolor=colSession)
+    
+    // Reset opening lines for the new session
+    reset_open_lines()
+
+// Update Session High/Low (Only if H/L changes)
+if in_session_window
+    new_h_sess = math.max(h_sess, high)
+    new_l_sess = math.min(l_sess, low)
+    
+    if new_h_sess != h_sess
+        h_sess := new_h_sess
+        box.set_top(b_sess, h_sess)
+
+    if new_l_sess != l_sess
+        l_sess := new_l_sess
+        box.set_bottom(b_sess, l_sess)
+
+    // Create new opening price lines at configured times
+    if drawLines
+        for i = 0 to array.size(openHours) - 1
+            ts_open = timestamp(tz, y, m, d, array.get(openHours, i), array.get(openMinutes, i), 0)
+            is_new_open = time >= ts_open and time[1] < ts_open
+            if is_new_open
+                price = open
+                l = line.new(ts_open, price, time, price, xloc=xloc.bar_time, color=colLine, style=line.style_dotted)
+                array.push(openLines, l)
+                array.push(openPrices, price)
+                array.push(openActive, true)
+                array.push(openStartIdx, bar_index)
+
+    // Manage existing opening price lines
+    for i = 0 to array.size(openLines) - 1
+        l = array.get(openLines, i)
+        price = array.get(openPrices, i)
+        is_active = array.get(openActive, i)
+        start_idx = array.get(openStartIdx, i)
+        if is_active
+            traded_to_price = bar_index > start_idx and high >= price and low <= price
+            if traded_to_price
+                line.set_x2(l, time)
+                array.set(openActive, i, false)
+            else
+                line.set_x2(l, time)
+
+// 2. REPEATING 80m / 40m CYCLES
+if in_session_window
+    // DETECT NEW CYCLE START (Optimized check using is_new_cycle)
+    if is_new_cycle
+        // Reset Highs/Lows
+        h_cyc := high
+        l_cyc := low
+        h_sub := high
+        l_sub := low
+        
+        // Create Boxes
+        b_cyc := box.new(t_cycle_start, high, t_cycle_end, low, xloc=xloc.bar_time, border_color=borderCol, bgcolor=col80m)
+        b_sub := box.new(t_cycle_start, high, t_sub_end, low, xloc=xloc.bar_time, border_color=na, bgcolor=col40m)
+
+    // UPDATE EXISTING CYCLE BOXES (Only if H/L changes)
+    
+    // 80m Box Updates
+    new_h_cyc = math.max(h_cyc, high)
+    new_l_cyc = math.min(l_cyc, low)
+    
+    if new_h_cyc != h_cyc
+        h_cyc := new_h_cyc
+        box.set_top(b_cyc, h_cyc)
+
+    if new_l_cyc != l_cyc
+        l_cyc := new_l_cyc
+        box.set_bottom(b_cyc, l_cyc)
+
+    // 40m Box Updates (Only if we are still inside the first 40 mins)
+    if time < t_sub_end
+        new_h_sub = math.max(h_sub, high)
+        new_l_sub = math.min(l_sub, low)
+        
+        if new_h_sub != h_sub
+            h_sub := new_h_sub
+            box.set_top(b_sub, h_sub)
+
+        if new_l_sub != l_sub
+            l_sub := new_l_sub
+            box.set_bottom(b_sub, l_sub)

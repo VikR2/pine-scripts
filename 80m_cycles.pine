@@ -154,16 +154,18 @@ init_open_times() =>
     array.clear(openHours)
     array.clear(openMinutes)
     parts = str.split(openTimesInput, ",")
-    for i = 0 to array.size(parts) - 1
-        part = array.get(parts, i)
-        [h, m_] = parse_open_time(part)
-        if not na(h) and not na(m_)
-            array.push(openHours, h)
-            array.push(openMinutes, m_)
+    if array.size(parts) > 0
+        for i = 0 to array.size(parts) - 1
+            part = array.get(parts, i)
+            [h, m_] = parse_open_time(part)
+            if not na(h) and not na(m_)
+                array.push(openHours, h)
+                array.push(openMinutes, m_)
 
 reset_open_lines() =>
-    for i = 0 to array.size(openLines) - 1
-        line.delete(array.get(openLines, i))
+    if array.size(openLines) > 0
+        for i = 0 to array.size(openLines) - 1
+            line.delete(array.get(openLines, i))
     array.clear(openLines)
     array.clear(openPrices)
     array.clear(openActive)
@@ -206,7 +208,7 @@ if in_session_window
         box.set_bottom(b_sess, l_sess)
 
     // Create new opening price lines at configured times
-    if drawLines
+    if drawLines and array.size(openHours) > 0
         for i = 0 to array.size(openHours) - 1
             ts_open = timestamp(tz, y, m, d, array.get(openHours, i), array.get(openMinutes, i), 0)
             is_new_open = time >= ts_open and time[1] < ts_open
@@ -219,18 +221,19 @@ if in_session_window
                 array.push(openStartIdx, bar_index)
 
     // Manage existing opening price lines
-    for i = 0 to array.size(openLines) - 1
-        l = array.get(openLines, i)
-        price = array.get(openPrices, i)
-        is_active = array.get(openActive, i)
-        start_idx = array.get(openStartIdx, i)
-        if is_active
-            traded_to_price = bar_index > start_idx and high >= price and low <= price
-            if traded_to_price
-                line.set_x2(l, time)
-                array.set(openActive, i, false)
-            else
-                line.set_x2(l, time)
+    if array.size(openLines) > 0
+        for i = 0 to array.size(openLines) - 1
+            l = array.get(openLines, i)
+            price = array.get(openPrices, i)
+            is_active = array.get(openActive, i)
+            start_idx = array.get(openStartIdx, i)
+            if is_active
+                traded_to_price = bar_index > start_idx and high >= price and low <= price
+                if traded_to_price
+                    line.set_x2(l, time)
+                    array.set(openActive, i, false)
+                else
+                    line.set_x2(l, time)
 
 // ── 2. CYCLE MANAGEMENT ────────────────────────────────────────────────────────
 if in_session_window

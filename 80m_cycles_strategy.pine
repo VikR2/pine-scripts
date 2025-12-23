@@ -4,7 +4,8 @@ strategy("80m Cycles Strategy", overlay=true,
      default_qty_value=1,
      initial_capital=10000,
      pyramiding=0,
-     calc_on_every_tick=false)
+     calc_on_every_tick=false,
+     max_bars_back=500)
 
 //------------------------------------------------------------------------------
 // INPUTS
@@ -59,8 +60,8 @@ else if justEnteredExec
 else if not inExec
     accumBars := 0
 
-// Get range from accumulation period
-lookback = math.max(1, accumBars)
+// Get range from accumulation period (cap at 50 to avoid buffer issues)
+lookback = math.min(math.max(1, accumBars), 50)
 accumHigh = ta.highest(high, lookback)
 accumLow = ta.lowest(low, lookback)
 

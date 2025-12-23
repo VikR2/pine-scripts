@@ -4,12 +4,10 @@ strategy("80m Cycles Strategy", overlay = true, default_qty_type = strategy.perc
 // ══════════════════════════════════════════════════════════════════════════════
 // 80-MINUTE CYCLE STRATEGY - BACKTESTER
 // ══════════════════════════════════════════════════════════════════════════════
-// Backtestable version of the 80-minute cycle strategy.
-// Uses CSD signals for entries with configurable stop loss and take profit.
-// ══════════════════════════════════════════════════════════════════════════════
 
 // ── STRATEGY INPUTS ────────────────────────────────────────────────────────────
 grp_strat = "Strategy Settings"
+entryMode      = input.string("Sweep Only", "Entry Mode", options=["Sweep Only", "Sweep + Reversal", "Full CSD"], group = grp_strat, tooltip="Sweep Only = enter on any sweep. Sweep+Reversal = sweep then opposite candle. Full CSD = strict pattern.")
 useStopLoss    = input.bool(true, "Use Stop Loss", group = grp_strat)
 stopAtLow      = input.bool(true, "Stop at 40m Low/High (vs Fixed Points)", group = grp_strat)
 fixedStopPts   = input.float(20.0, "Fixed Stop Loss (Points)", minval=1.0, group = grp_strat)
@@ -17,7 +15,7 @@ useTakeProfit  = input.bool(true, "Use Take Profit", group = grp_strat)
 takeProfitPts  = input.float(70.0, "Take Profit (Points)", minval=10.0, group = grp_strat)
 useTrailStop   = input.bool(false, "Use Trailing Stop", group = grp_strat)
 trailPts       = input.float(30.0, "Trail Points", minval=5.0, group = grp_strat)
-maxRiskPts     = input.float(25.0, "Max Risk Filter (skip if stop > X pts)", minval=0.0, group = grp_strat, tooltip="Set to 0 to disable filter")
+maxRiskPts     = input.float(0.0, "Max Risk Filter (0=disabled)", minval=0.0, group = grp_strat)
 onlyLongs      = input.bool(false, "Long Only", group = grp_strat)
 onlyShorts     = input.bool(false, "Short Only", group = grp_strat)
 
@@ -31,26 +29,28 @@ endM       = input.int(0,  "Session End Minute", minval=0, maxval=59, group = gr
 
 // ── FILTER INPUTS ──────────────────────────────────────────────────────────────
 grp_filter = "Trade Filters"
-reqEQConfirm   = input.bool(true, "Require Price in Discount/Premium Zone", group = grp_filter, tooltip="Buy only in discount (below EQ), sell only in premium (above EQ)")
-minRangeATR    = input.float(0.5, "Min 40m Range (ATR multiplier)", minval=0.0, group = grp_filter, tooltip="Skip cycles with small range. Set to 0 to disable.")
+reqEQConfirm   = input.bool(false, "Require Discount/Premium Zone", group = grp_filter)
+minRangeATR    = input.float(0.0, "Min 40m Range (ATR mult, 0=disabled)", minval=0.0, group = grp_filter)
 
-// ── VISUAL INPUTS ──────────────────────────────────────────────────────────────
-grp_visual = "Visual Settings"
-showBoxes      = input.bool(true, "Show Cycle Boxes", group = grp_visual)
-showLevels     = input.bool(true, "Show Level Lines", group = grp_visual)
-col80m         = input.color(color.new(color.gray, 92), "80min Cycle Box", group = grp_visual)
-col40m         = input.color(color.new(color.rgb(100, 140, 160), 88), "Accumulation Phase", group = grp_visual)
-colHigh        = input.color(color.red, "40m High", group = grp_visual)
-colLow         = input.color(color.green, "40m Low", group = grp_visual)
-colEQ          = input.color(color.orange, "Equilibrium", group = grp_visual)
+// ── DEBUG INPUTS ───────────────────────────────────────────────────────────────
+grp_debug = "Debug / Visual"
+showBoxes      = input.bool(true, "Show Cycle Boxes", group = grp_debug)
+showLevels     = input.bool(true, "Show Level Lines", group = grp_debug)
+showSweeps     = input.bool(true, "Show Sweep Markers", group = grp_debug)
+showDebugTable = input.bool(true, "Show Debug Table", group = grp_debug)
+col80m         = input.color(color.new(color.gray, 92), "80min Cycle Box", group = grp_debug)
+col40m         = input.color(color.new(color.rgb(100, 140, 160), 88), "Accumulation Phase", group = grp_debug)
+colHigh        = input.color(color.red, "40m High", group = grp_debug)
+colLow         = input.color(color.green, "40m Low", group = grp_debug)
+colEQ          = input.color(color.orange, "Equilibrium", group = grp_debug)
 
 // ── TIME CALCULATIONS ──────────────────────────────────────────────────────────
 y = year(time, tz)
-m = month(time, tz)
+mo = month(time, tz)
 d = dayofmonth(time, tz)
 
-t_sess_start = timestamp(tz, y, m, d, startH, startM, 0)
-t_sess_end   = timestamp(tz, y, m, d, endH, endM, 0)
+t_sess_start = timestamp(tz, y, mo, d, startH, startM, 0)
+t_sess_end   = timestamp(tz, y, mo, d, endH, endM, 0)
 
 ms_80 = 80 * 60 * 1000
 ms_40 = 40 * 60 * 1000
@@ -90,8 +90,13 @@ var line l_eq = na
 var bool high_swept = false
 var bool low_swept = false
 var int sweep_bar = na
-var bool csd_triggered = false
-var int trade_direction = 0  // 1 = long, -1 = short
+var bool trade_taken = false
+var int trade_direction = 0
+
+// Debug counters
+var int total_cycles = 0
+var int total_sweeps = 0
+var int total_signals = 0
 
 // ATR for filters
 atr_val = ta.atr(14)
@@ -107,6 +112,8 @@ is_bearish = close < open
 if in_session_window
     // NEW CYCLE START
     if is_new_cycle
+        total_cycles := total_cycles + 1
+
         // Reset state
         h_cyc := high
         l_cyc := low
@@ -118,7 +125,7 @@ if in_session_window
         high_swept := false
         low_swept := false
         sweep_bar := na
-        csd_triggered := false
+        trade_taken := false
         trade_direction := 0
 
         // Delete previous lines
@@ -139,12 +146,12 @@ if in_session_window
 
     if new_h_cyc != h_cyc
         h_cyc := new_h_cyc
-        if showBoxes
+        if showBoxes and not na(b_cyc)
             box.set_top(b_cyc, h_cyc)
 
     if new_l_cyc != l_cyc
         l_cyc := new_l_cyc
-        if showBoxes
+        if showBoxes and not na(b_cyc)
             box.set_bottom(b_cyc, l_cyc)
 
     // Update 40m box (accumulation only)
@@ -154,22 +161,22 @@ if in_session_window
 
         if new_h_sub != h_sub
             h_sub := new_h_sub
-            if showBoxes
+            if showBoxes and not na(b_sub)
                 box.set_top(b_sub, h_sub)
 
         if new_l_sub != l_sub
             l_sub := new_l_sub
-            if showBoxes
+            if showBoxes and not na(b_sub)
                 box.set_bottom(b_sub, l_sub)
 
 // ── LEVEL PROJECTION ───────────────────────────────────────────────────────────
 is_phase_transition = in_execution and in_accumulation[1]
 
 if is_phase_transition and showLevels
-    eq_price = (h_sub + l_sub) / 2
+    eq_price_draw = (h_sub + l_sub) / 2
     l_high := line.new(t_sub_end, h_sub, t_cycle_end, h_sub, xloc=xloc.bar_time, color=colHigh, style=line.style_dashed, width=1)
     l_low  := line.new(t_sub_end, l_sub, t_cycle_end, l_sub, xloc=xloc.bar_time, color=colLow, style=line.style_dashed, width=1)
-    l_eq   := line.new(t_sub_end, eq_price, t_cycle_end, eq_price, xloc=xloc.bar_time, color=colEQ, style=line.style_dotted, width=2)
+    l_eq   := line.new(t_sub_end, eq_price_draw, t_cycle_end, eq_price_draw, xloc=xloc.bar_time, color=colEQ, style=line.style_dotted, width=2)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SIGNAL DETECTION
@@ -185,112 +192,125 @@ range_40m = h_sub - l_sub
 range_ok = minRangeATR == 0 or range_40m >= (atr_val * minRangeATR)
 
 // Liquidity sweep detection
-if in_execution and not csd_triggered
+sweep_high_now = false
+sweep_low_now = false
+
+if in_execution and not trade_taken
     // Sweep of 40m High (bearish setup)
     if high > h_sub and not high_swept
         high_swept := true
         sweep_bar := bar_index
+        sweep_high_now := true
+        total_sweeps := total_sweeps + 1
 
     // Sweep of 40m Low (bullish setup)
     if low < l_sub and not low_swept
         low_swept := true
         sweep_bar := bar_index
+        sweep_low_now := true
+        total_sweeps := total_sweeps + 1
 
-// ── CSD SIGNAL DETECTION ───────────────────────────────────────────────────────
+// Plot sweep markers
+plotshape(sweep_high_now and showSweeps, title="High Sweep", location=location.abovebar, style=shape.xcross, size=size.small, color=color.red, text="SWEEP")
+plotshape(sweep_low_now and showSweeps, title="Low Sweep", location=location.belowbar, style=shape.xcross, size=size.small, color=color.green, text="SWEEP")
+
+// ── ENTRY SIGNAL DETECTION ─────────────────────────────────────────────────────
 var float entry_price = na
 var float stop_level = na
 var float tp_level = na
 
-// BUY SIGNAL
-buy_csd = false
-if in_execution and not csd_triggered and low_swept and bar_index > sweep_bar
-    if is_bearish[1] and (close > high[1] or high > high[1])
-        // Calculate stop
-        stop_calc = stopAtLow ? l_sub : (close - fixedStopPts)
-        stop_dist = close - stop_calc
+buy_signal = false
+sell_signal = false
 
-        // Zone filter
-        zone_ok = not reqEQConfirm or in_discount
+if in_execution and not trade_taken
 
-        // Risk filter
-        risk_ok = maxRiskPts == 0 or stop_dist <= maxRiskPts
+    // ── BUY LOGIC ──
+    if low_swept and not onlyShorts
+        bool entry_trigger = false
 
-        // Direction filter
-        dir_ok = not onlyShorts
+        if entryMode == "Sweep Only"
+            // Enter immediately on sweep
+            entry_trigger := sweep_low_now
+        else if entryMode == "Sweep + Reversal"
+            // Enter when we get a bullish candle after sweep
+            entry_trigger := bar_index > sweep_bar and is_bullish
+        else // Full CSD
+            // Enter when bearish candle is traded above
+            entry_trigger := bar_index > sweep_bar and is_bearish[1] and (close > high[1] or high > high[1])
 
-        if zone_ok and risk_ok and range_ok and dir_ok
-            buy_csd := true
-            csd_triggered := true
-            trade_direction := 1
-            entry_price := close
-            stop_level := stop_calc
-            tp_level := close + takeProfitPts
+        if entry_trigger
+            stop_calc = stopAtLow ? l_sub : (close - fixedStopPts)
+            stop_dist = math.abs(close - stop_calc)
+            zone_ok = not reqEQConfirm or in_discount
+            risk_ok = maxRiskPts == 0 or stop_dist <= maxRiskPts
 
-// SELL SIGNAL
-sell_csd = false
-if in_execution and not csd_triggered and high_swept and bar_index > sweep_bar
-    if is_bullish[1] and (close < low[1] or low < low[1])
-        // Calculate stop
-        stop_calc = stopAtLow ? h_sub : (close + fixedStopPts)
-        stop_dist = stop_calc - close
+            if zone_ok and risk_ok and range_ok
+                buy_signal := true
+                trade_taken := true
+                trade_direction := 1
+                entry_price := close
+                stop_level := stop_calc
+                tp_level := close + takeProfitPts
+                total_signals := total_signals + 1
 
-        // Zone filter
-        zone_ok = not reqEQConfirm or in_premium
+    // ── SELL LOGIC ──
+    if high_swept and not onlyLongs
+        bool entry_trigger = false
 
-        // Risk filter
-        risk_ok = maxRiskPts == 0 or stop_dist <= maxRiskPts
+        if entryMode == "Sweep Only"
+            entry_trigger := sweep_high_now
+        else if entryMode == "Sweep + Reversal"
+            entry_trigger := bar_index > sweep_bar and is_bearish
+        else // Full CSD
+            entry_trigger := bar_index > sweep_bar and is_bullish[1] and (close < low[1] or low < low[1])
 
-        // Direction filter
-        dir_ok = not onlyLongs
+        if entry_trigger
+            stop_calc = stopAtLow ? h_sub : (close + fixedStopPts)
+            stop_dist = math.abs(stop_calc - close)
+            zone_ok = not reqEQConfirm or in_premium
+            risk_ok = maxRiskPts == 0 or stop_dist <= maxRiskPts
 
-        if zone_ok and risk_ok and range_ok and dir_ok
-            sell_csd := true
-            csd_triggered := true
-            trade_direction := -1
-            entry_price := close
-            stop_level := stop_calc
-            tp_level := close - takeProfitPts
+            if zone_ok and risk_ok and range_ok
+                sell_signal := true
+                trade_taken := true
+                trade_direction := -1
+                entry_price := close
+                stop_level := stop_calc
+                tp_level := close - takeProfitPts
+                total_signals := total_signals + 1
 
 // ══════════════════════════════════════════════════════════════════════════════
 // STRATEGY EXECUTION
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Entry signals
-if buy_csd
+if buy_signal
     strategy.entry("Long", strategy.long)
-
     if useStopLoss and useTakeProfit
-        strategy.exit("Long Exit", "Long", stop=stop_level, limit=tp_level, trail_points=useTrailStop ? trailPts : na, trail_offset=useTrailStop ? trailPts * 0.5 : na)
+        strategy.exit("Long Exit", "Long", stop=stop_level, limit=tp_level)
     else if useStopLoss
         strategy.exit("Long SL", "Long", stop=stop_level)
     else if useTakeProfit
         strategy.exit("Long TP", "Long", limit=tp_level)
 
-if sell_csd
+if sell_signal
     strategy.entry("Short", strategy.short)
-
     if useStopLoss and useTakeProfit
-        strategy.exit("Short Exit", "Short", stop=stop_level, limit=tp_level, trail_points=useTrailStop ? trailPts : na, trail_offset=useTrailStop ? trailPts * 0.5 : na)
+        strategy.exit("Short Exit", "Short", stop=stop_level, limit=tp_level)
     else if useStopLoss
         strategy.exit("Short SL", "Short", stop=stop_level)
     else if useTakeProfit
         strategy.exit("Short TP", "Short", limit=tp_level)
 
-// Close at end of session (optional safety)
+// Close at end of session
 if time >= t_sess_end and strategy.position_size != 0
     strategy.close_all("Session End")
-
-// Close at end of cycle (optional - uncomment to use)
-// if is_new_cycle and strategy.position_size != 0
-//     strategy.close_all("Cycle End")
 
 // ══════════════════════════════════════════════════════════════════════════════
 // VISUAL MARKERS
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Plot entry signals on chart
-plotshape(buy_csd, title="Buy CSD", location=location.belowbar, style=shape.triangleup, size=size.normal, color=color.lime, text="BUY")
-plotshape(sell_csd, title="Sell CSD", location=location.abovebar, style=shape.triangledown, size=size.normal, color=color.red, text="SELL")
+plotshape(buy_signal, title="Buy Signal", location=location.belowbar, style=shape.triangleup, size=size.normal, color=color.lime, text="BUY")
+plotshape(sell_signal, title="Sell Signal", location=location.abovebar, style=shape.triangledown, size=size.normal, color=color.red, text="SELL")
 
 // Plot levels
 plot(in_execution and showLevels ? h_sub : na, "40m High", color=colHigh, style=plot.style_linebr, linewidth=1)
@@ -302,21 +322,27 @@ bgcolor(in_accumulation and showBoxes ? color.new(color.yellow, 95) : na, title=
 bgcolor(in_execution and showBoxes ? color.new(color.blue, 97) : na, title="Execution Phase")
 
 // ══════════════════════════════════════════════════════════════════════════════
-// INFO TABLE
+// DEBUG TABLE
 // ══════════════════════════════════════════════════════════════════════════════
-var table infoTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+var table debugTable = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
 
-if barstate.islast and in_session_window
+if barstate.islast and showDebugTable
     cycle_num = i_cyc + 1
-    phase_text = in_accumulation ? "ACCUM" : "EXEC"
+    phase_text = in_accumulation ? "ACCUM" : (in_execution ? "EXEC" : "OUT")
 
-    table.cell(infoTable, 0, 0, "Cycle", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 0, str.tostring(cycle_num), text_color=color.white, text_size=size.small)
-    table.cell(infoTable, 0, 1, "Phase", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 1, phase_text, text_color=in_accumulation ? color.yellow : color.lime, text_size=size.small)
-    table.cell(infoTable, 0, 2, "40m Range", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 2, str.tostring(range_40m, "#.##"), text_color=color.white, text_size=size.small)
-    table.cell(infoTable, 0, 3, "EQ", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 3, str.tostring(eq_price, "#.##"), text_color=colEQ, text_size=size.small)
-    table.cell(infoTable, 0, 4, "Position", text_color=color.gray, text_size=size.small)
-    table.cell(infoTable, 1, 4, strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT", text_color=strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray, text_size=size.small)
+    table.cell(debugTable, 0, 0, "Cycle #", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 0, str.tostring(cycle_num), text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 0, 1, "Phase", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 1, phase_text, text_color=in_accumulation ? color.yellow : color.lime, text_size=size.small)
+    table.cell(debugTable, 0, 2, "40m High", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 2, str.tostring(h_sub, "#.##"), text_color=colHigh, text_size=size.small)
+    table.cell(debugTable, 0, 3, "40m Low", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 3, str.tostring(l_sub, "#.##"), text_color=colLow, text_size=size.small)
+    table.cell(debugTable, 0, 4, "High Swept", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 4, high_swept ? "YES" : "NO", text_color=high_swept ? color.lime : color.red, text_size=size.small)
+    table.cell(debugTable, 0, 5, "Low Swept", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 5, low_swept ? "YES" : "NO", text_color=low_swept ? color.lime : color.red, text_size=size.small)
+    table.cell(debugTable, 0, 6, "Total Sweeps", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 6, str.tostring(total_sweeps), text_color=color.white, text_size=size.small)
+    table.cell(debugTable, 0, 7, "Total Signals", text_color=color.gray, text_size=size.small)
+    table.cell(debugTable, 1, 7, str.tostring(total_signals), text_color=color.white, text_size=size.small)

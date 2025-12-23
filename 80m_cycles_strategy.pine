@@ -1,101 +1,128 @@
 //@version=6
-strategy("80m Cycles Strategy", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=10000, use_bar_magnifier=true)
+strategy("80m Cycles Strategy", overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     initial_capital=10000,
+     pyramiding=0,
+     calc_on_every_tick=false)
 
-// ══════════════════════════════════════════════════════════════════════════════
+//------------------------------------------------------------------------------
 // INPUTS
-// ══════════════════════════════════════════════════════════════════════════════
-tz = "America/New_York"
-startH = input.int(7, "Session Start Hour")
-endH = input.int(16, "Session End Hour")
-stopPts = input.float(30.0, "Stop Points")
-tpPts = input.float(70.0, "TP Points")
+//------------------------------------------------------------------------------
+i_startHour = input.int(7, "Session Start Hour", minval=0, maxval=23)
+i_endHour = input.int(16, "Session End Hour", minval=0, maxval=23)
+i_stopPts = input.float(30.0, "Stop Loss (points)", minval=1)
+i_tpPts = input.float(70.0, "Take Profit (points)", minval=1)
+i_tz = "America/New_York"
 
-// ══════════════════════════════════════════════════════════════════════════════
-// TIME CALCULATIONS
-// ══════════════════════════════════════════════════════════════════════════════
-y = year(time, tz)
-mo = month(time, tz)
-d = dayofmonth(time, tz)
+//------------------------------------------------------------------------------
+// TIME FUNCTIONS
+//------------------------------------------------------------------------------
+f_inSession() =>
+    h = hour(time, i_tz)
+    h >= i_startHour and h < i_endHour
 
-sessStart = timestamp(tz, y, mo, d, startH, 0, 0)
-sessEnd = timestamp(tz, y, mo, d, endH, 0, 0)
+f_getCyclePhase() =>
+    // Returns: 0=outside, 1=accumulation, 2=execution
+    if not f_inSession()
+        0
+    else
+        h = hour(time, i_tz)
+        m = minute(time, i_tz)
+        totalMins = (h - i_startHour) * 60 + m
+        cycleMin = totalMins % 80
+        cycleMin < 40 ? 1 : 2
 
-ms80 = 80 * 60 * 1000
-ms40 = 40 * 60 * 1000
+//------------------------------------------------------------------------------
+// PHASE TRACKING
+//------------------------------------------------------------------------------
+phase = f_getCyclePhase()
+inAccum = phase == 1
+inExec = phase == 2
 
-inSession = time >= sessStart and time < sessEnd
-cycleIdx = inSession ? math.floor((time - sessStart) / ms80) : -1
-newCycle = cycleIdx != cycleIdx[1] and cycleIdx >= 0
+// Detect phase transitions
+wasAccum = inAccum[1] or (phase[1] == 0 and inAccum)
+justEnteredExec = inExec and not inExec[1]
+justEnteredAccum = inAccum and not inAccum[1]
 
-cycleStart = sessStart + (cycleIdx * ms80)
-phase2Start = cycleStart + ms40
-cycleEnd = cycleStart + ms80
+//------------------------------------------------------------------------------
+// RANGE TRACKING - Using ta.highest/ta.lowest with lookback
+//------------------------------------------------------------------------------
+// Count bars in current accumulation phase
+var int accumBars = 0
+if justEnteredAccum
+    accumBars := 1
+else if inAccum
+    accumBars := accumBars + 1
+else if justEnteredExec
+    accumBars := accumBars  // Keep the count
+else if not inExec
+    accumBars := 0
 
-inPhase1 = time >= cycleStart and time < phase2Start
-inPhase2 = time >= phase2Start and time < cycleEnd
+// Get range from accumulation period
+lookback = math.max(1, accumBars)
+accumHigh = ta.highest(high, lookback)
+accumLow = ta.lowest(low, lookback)
 
-// ══════════════════════════════════════════════════════════════════════════════
-// TRACK RANGE
-// ══════════════════════════════════════════════════════════════════════════════
+// Lock in values at phase transition
 var float rangeHigh = na
 var float rangeLow = na
 
-if newCycle
-    rangeHigh := high
-    rangeLow := low
+if justEnteredExec
+    rangeHigh := accumHigh[1]
+    rangeLow := accumLow[1]
 
-if inPhase1
-    rangeHigh := math.max(nz(rangeHigh, high), high)
-    rangeLow := math.min(nz(rangeLow, low), low)
+//------------------------------------------------------------------------------
+// SWEEP DETECTION
+//------------------------------------------------------------------------------
+sweepHigh = inExec and not na(rangeHigh) and high > rangeHigh
+sweepLow = inExec and not na(rangeLow) and low < rangeLow
 
-// ══════════════════════════════════════════════════════════════════════════════
-// DETECT SWEEPS - Simple version
-// ══════════════════════════════════════════════════════════════════════════════
-sweepHigh = inPhase2 and not na(rangeHigh) and high > rangeHigh
-sweepLow = inPhase2 and not na(rangeLow) and low < rangeLow
+// Track if we already traded this cycle
+var bool tradedThisCycle = false
+if justEnteredAccum or justEnteredExec
+    tradedThisCycle := false
 
-// Prevent multiple signals per cycle
-var int lastLongCycle = -1
-var int lastShortCycle = -1
+//------------------------------------------------------------------------------
+// STRATEGY LOGIC
+//------------------------------------------------------------------------------
+longCondition = sweepLow and not tradedThisCycle and strategy.position_size == 0
+shortCondition = sweepHigh and not tradedThisCycle and strategy.position_size == 0
 
-longOK = cycleIdx != lastLongCycle
-shortOK = cycleIdx != lastShortCycle
-
-// ══════════════════════════════════════════════════════════════════════════════
-// STRATEGY ENTRIES
-// ══════════════════════════════════════════════════════════════════════════════
-if sweepLow and longOK and strategy.position_size == 0
-    lastLongCycle := cycleIdx
+if longCondition
+    tradedThisCycle := true
     strategy.entry("Long", strategy.long)
 
-if sweepHigh and shortOK and strategy.position_size == 0
-    lastShortCycle := cycleIdx
+if shortCondition
+    tradedThisCycle := true
     strategy.entry("Short", strategy.short)
 
-// Exits
+// Exit logic using strategy.position_avg_price
 if strategy.position_size > 0
-    strategy.exit("LX", "Long", stop=strategy.position_avg_price - stopPts, limit=strategy.position_avg_price + tpPts)
+    stopPrice = strategy.position_avg_price - i_stopPts
+    tpPrice = strategy.position_avg_price + i_tpPts
+    strategy.exit("Exit Long", "Long", stop=stopPrice, limit=tpPrice)
 
 if strategy.position_size < 0
-    strategy.exit("SX", "Short", stop=strategy.position_avg_price + stopPts, limit=strategy.position_avg_price - tpPts)
+    stopPrice = strategy.position_avg_price + i_stopPts
+    tpPrice = strategy.position_avg_price - i_tpPts
+    strategy.exit("Exit Short", "Short", stop=stopPrice, limit=tpPrice)
 
-// End of day
-if time >= sessEnd and strategy.position_size != 0
-    strategy.close_all("EOD")
+// Close at end of session
+if not f_inSession() and strategy.position_size != 0
+    strategy.close_all("Session Close")
 
-// ══════════════════════════════════════════════════════════════════════════════
-// VISUALS
-// ══════════════════════════════════════════════════════════════════════════════
-plotshape(sweepLow and longOK, "Long", shape.triangleup, location.belowbar, color.lime, size=size.small)
-plotshape(sweepHigh and shortOK, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+//------------------------------------------------------------------------------
+// PLOTS
+//------------------------------------------------------------------------------
+plotshape(longCondition, "Long Signal", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(shortCondition, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
 
-plot(inPhase2 ? rangeHigh : na, "High", color.red, 1, plot.style_linebr)
-plot(inPhase2 ? rangeLow : na, "Low", color.green, 1, plot.style_linebr)
+plot(inExec ? rangeHigh : na, "Range High", color.red, 2)
+plot(inExec ? rangeLow : na, "Range Low", color.green, 2)
 
-bgcolor(inPhase1 ? color.new(color.yellow, 90) : inPhase2 ? color.new(color.blue, 93) : na)
+bgcolor(inAccum ? color.new(color.yellow, 90) : inExec ? color.new(color.blue, 90) : na)
 
-// Debug - show trade count
-var label lbl = na
-label.delete(lbl)
-if barstate.islast
-    lbl := label.new(bar_index, high, "Closed: " + str.tostring(strategy.closedtrades) + "\nOpen: " + str.tostring(strategy.opentrades), style=label.style_label_down, color=color.blue)
+// Debug info
+plotchar(sweepLow, "Sweep Low", "▼", location.abovebar, color.green, size=size.tiny)
+plotchar(sweepHigh, "Sweep High", "▲", location.belowbar, color.red, size=size.tiny)

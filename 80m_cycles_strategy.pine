@@ -1,122 +1,101 @@
 //@version=6
-strategy("80m Cycles Strategy", overlay=true,
-     default_qty_type=strategy.fixed,
-     default_qty_value=1,
-     initial_capital=10000,
-     calc_on_order_fills=true,
-     calc_on_every_tick=false,
-     use_bar_magnifier=true)
+strategy("80m Cycles Strategy", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=10000, use_bar_magnifier=true)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SIMPLIFIED 80-MINUTE CYCLE STRATEGY
+// INPUTS
 // ══════════════════════════════════════════════════════════════════════════════
+tz = "America/New_York"
+startH = input.int(7, "Session Start Hour")
+endH = input.int(16, "Session End Hour")
+stopPts = input.float(30.0, "Stop Points")
+tpPts = input.float(70.0, "TP Points")
 
-// ── INPUTS ─────────────────────────────────────────────────────────────────────
-grp_strat = "Strategy"
-stopPts = input.float(30.0, "Stop Loss Points", group=grp_strat)
-tpPts   = input.float(70.0, "Take Profit Points", group=grp_strat)
-
-grp_time = "Time (EST)"
-tz       = "America/New_York"
-startH   = input.int(7, "Session Start Hour", group=grp_time)
-endH     = input.int(16, "Session End Hour", group=grp_time)
-
-// ── TIME LOGIC ─────────────────────────────────────────────────────────────────
-y  = year(time, tz)
+// ══════════════════════════════════════════════════════════════════════════════
+// TIME CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+y = year(time, tz)
 mo = month(time, tz)
-d  = dayofmonth(time, tz)
+d = dayofmonth(time, tz)
 
-t_sess_start = timestamp(tz, y, mo, d, startH, 0, 0)
-t_sess_end   = timestamp(tz, y, mo, d, endH, 0, 0)
+sessStart = timestamp(tz, y, mo, d, startH, 0, 0)
+sessEnd = timestamp(tz, y, mo, d, endH, 0, 0)
 
-ms_80 = 80 * 60 * 1000
-ms_40 = 40 * 60 * 1000
+ms80 = 80 * 60 * 1000
+ms40 = 40 * 60 * 1000
 
-in_session = time >= t_sess_start and time < t_sess_end
-i_cyc = in_session ? math.floor((time - t_sess_start) / ms_80) : -1
-is_new_cycle = i_cyc != i_cyc[1] and i_cyc >= 0
+inSession = time >= sessStart and time < sessEnd
+cycleIdx = inSession ? math.floor((time - sessStart) / ms80) : -1
+newCycle = cycleIdx != cycleIdx[1] and cycleIdx >= 0
 
-t_cycle_start = t_sess_start + (i_cyc * ms_80)
-t_phase2_start = t_cycle_start + ms_40
-t_cycle_end = t_cycle_start + ms_80
+cycleStart = sessStart + (cycleIdx * ms80)
+phase2Start = cycleStart + ms40
+cycleEnd = cycleStart + ms80
 
-in_phase1 = time >= t_cycle_start and time < t_phase2_start
-in_phase2 = time >= t_phase2_start and time < t_cycle_end
-
-// ── TRACK 40-MIN RANGE ─────────────────────────────────────────────────────────
-var float p1_high = na
-var float p1_low = na
-var bool did_trade = false
-
-if is_new_cycle
-    p1_high := high
-    p1_low := low
-    did_trade := false
-
-if in_phase1
-    p1_high := math.max(nz(p1_high, high), high)
-    p1_low := math.min(nz(p1_low, low), low)
-
-// ── DETECT SWEEPS ──────────────────────────────────────────────────────────────
-var bool swept_high = false
-var bool swept_low = false
-
-if is_new_cycle
-    swept_high := false
-    swept_low := false
-
-sweep_h = in_phase2 and not na(p1_high) and high > p1_high and not swept_high
-sweep_l = in_phase2 and not na(p1_low) and low < p1_low and not swept_low
-
-if sweep_h
-    swept_high := true
-if sweep_l
-    swept_low := true
-
-// ── GENERATE SIGNALS ───────────────────────────────────────────────────────────
-go_long = sweep_l and not did_trade
-go_short = sweep_h and not did_trade
+inPhase1 = time >= cycleStart and time < phase2Start
+inPhase2 = time >= phase2Start and time < cycleEnd
 
 // ══════════════════════════════════════════════════════════════════════════════
-// EXECUTE TRADES
+// TRACK RANGE
 // ══════════════════════════════════════════════════════════════════════════════
+var float rangeHigh = na
+var float rangeLow = na
 
-if go_long
-    did_trade := true
-    strategy.entry("L", strategy.long)
-    strategy.exit("LX", "L", stop=close - stopPts, limit=close + tpPts)
+if newCycle
+    rangeHigh := high
+    rangeLow := low
 
-if go_short
-    did_trade := true
-    strategy.entry("S", strategy.short)
-    strategy.exit("SX", "S", stop=close + stopPts, limit=close - tpPts)
+if inPhase1
+    rangeHigh := math.max(nz(rangeHigh, high), high)
+    rangeLow := math.min(nz(rangeLow, low), low)
 
-// Close at session end
-if time >= t_sess_end
+// ══════════════════════════════════════════════════════════════════════════════
+// DETECT SWEEPS - Simple version
+// ══════════════════════════════════════════════════════════════════════════════
+sweepHigh = inPhase2 and not na(rangeHigh) and high > rangeHigh
+sweepLow = inPhase2 and not na(rangeLow) and low < rangeLow
+
+// Prevent multiple signals per cycle
+var int lastLongCycle = -1
+var int lastShortCycle = -1
+
+longOK = cycleIdx != lastLongCycle
+shortOK = cycleIdx != lastShortCycle
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STRATEGY ENTRIES
+// ══════════════════════════════════════════════════════════════════════════════
+if sweepLow and longOK and strategy.position_size == 0
+    lastLongCycle := cycleIdx
+    strategy.entry("Long", strategy.long)
+
+if sweepHigh and shortOK and strategy.position_size == 0
+    lastShortCycle := cycleIdx
+    strategy.entry("Short", strategy.short)
+
+// Exits
+if strategy.position_size > 0
+    strategy.exit("LX", "Long", stop=strategy.position_avg_price - stopPts, limit=strategy.position_avg_price + tpPts)
+
+if strategy.position_size < 0
+    strategy.exit("SX", "Short", stop=strategy.position_avg_price + stopPts, limit=strategy.position_avg_price - tpPts)
+
+// End of day
+if time >= sessEnd and strategy.position_size != 0
     strategy.close_all("EOD")
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PLOTS
+// VISUALS
 // ══════════════════════════════════════════════════════════════════════════════
+plotshape(sweepLow and longOK, "Long", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(sweepHigh and shortOK, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
 
-plotshape(go_long, "BUY", shape.triangleup, location.belowbar, color.lime, size=size.normal)
-plotshape(go_short, "SELL", shape.triangledown, location.abovebar, color.red, size=size.normal)
+plot(inPhase2 ? rangeHigh : na, "High", color.red, 1, plot.style_linebr)
+plot(inPhase2 ? rangeLow : na, "Low", color.green, 1, plot.style_linebr)
 
-plot(in_phase2 ? p1_high : na, "High", color.red, 1, plot.style_linebr)
-plot(in_phase2 ? p1_low : na, "Low", color.green, 1, plot.style_linebr)
+bgcolor(inPhase1 ? color.new(color.yellow, 90) : inPhase2 ? color.new(color.blue, 93) : na)
 
-bgcolor(in_phase1 ? color.new(color.yellow, 93) : in_phase2 ? color.new(color.blue, 95) : na)
-
-// Debug table
-var table t = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 70))
+// Debug - show trade count
+var label lbl = na
+label.delete(lbl)
 if barstate.islast
-    table.cell(t, 0, 0, "Cycle", text_color=color.gray)
-    table.cell(t, 1, 0, str.tostring(i_cyc+1), text_color=color.white)
-    table.cell(t, 0, 1, "Phase", text_color=color.gray)
-    table.cell(t, 1, 1, in_phase1 ? "1-ACCUM" : "2-EXEC", text_color=color.white)
-    table.cell(t, 0, 2, "Swept H", text_color=color.gray)
-    table.cell(t, 1, 2, swept_high ? "YES" : "NO", text_color=swept_high ? color.lime : color.red)
-    table.cell(t, 0, 3, "Swept L", text_color=color.gray)
-    table.cell(t, 1, 3, swept_low ? "YES" : "NO", text_color=swept_low ? color.lime : color.red)
-    table.cell(t, 0, 4, "Trades", text_color=color.gray)
-    table.cell(t, 1, 4, str.tostring(strategy.closedtrades), text_color=color.white)
+    lbl := label.new(bar_index, high, "Closed: " + str.tostring(strategy.closedtrades) + "\nOpen: " + str.tostring(strategy.opentrades), style=label.style_label_down, color=color.blue)

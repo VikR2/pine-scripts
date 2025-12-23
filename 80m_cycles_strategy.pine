@@ -3,7 +3,8 @@ strategy("80m Cycles Strategy", overlay=true,
      default_qty_type=strategy.fixed,
      default_qty_value=1,
      initial_capital=10000,
-     pyramiding=0)
+     pyramiding=1,
+     process_orders_on_close=true)
 
 //------------------------------------------------------------------------------
 // INPUTS
@@ -21,19 +22,16 @@ currentHour = hour(time, i_tz)
 currentMin = minute(time, i_tz)
 inSession = currentHour >= i_startHour and currentHour < i_endHour
 
-// Calculate cycle phase using modulo
 totalMins = inSession ? (currentHour - i_startHour) * 60 + currentMin : -1
 cycleMin = totalMins >= 0 ? totalMins % 80 : -1
 
-inPhase1 = inSession and cycleMin >= 0 and cycleMin < 40   // Accumulation
-inPhase2 = inSession and cycleMin >= 40                      // Execution
+inPhase1 = inSession and cycleMin >= 0 and cycleMin < 40
+inPhase2 = inSession and cycleMin >= 40
 
-// Detect phase changes
 enteringPhase1 = inPhase1 and not inPhase1[1]
-enteringPhase2 = inPhase2 and not inPhase2[1]
 
 //------------------------------------------------------------------------------
-// RANGE TRACKING (Manual - no ta.highest/lowest)
+// RANGE TRACKING
 //------------------------------------------------------------------------------
 var float rangeHigh = na
 var float rangeLow = na
@@ -47,55 +45,48 @@ if inPhase1
     rangeLow := math.min(nz(rangeLow, low), low)
 
 //------------------------------------------------------------------------------
-// SWEEP DETECTION
+// SIGNALS - SIMPLIFIED
 //------------------------------------------------------------------------------
 validRange = not na(rangeHigh) and not na(rangeLow)
 sweepHigh = inPhase2 and validRange and high > rangeHigh
 sweepLow = inPhase2 and validRange and low < rangeLow
 
-// One trade per cycle
-var bool tradedThisCycle = false
-if enteringPhase1
-    tradedThisCycle := false
+// Track sweeps per cycle to avoid multiple entries
+var int lastSweepCycle = -1
+cycleNum = inSession ? math.floor(totalMins / 80) : -1
+newCycle = cycleNum != cycleNum[1]
+
+if newCycle
+    lastSweepCycle := -1
 
 //------------------------------------------------------------------------------
-// STRATEGY ENTRIES
+// STRATEGY - DIRECT ENTRY ON SWEEP
 //------------------------------------------------------------------------------
-canTrade = not tradedThisCycle and strategy.position_size == 0
+// Long on low sweep
+if sweepLow and lastSweepCycle != cycleNum
+    lastSweepCycle := cycleNum
+    strategy.entry("L", strategy.long)
+    strategy.exit("L_Exit", "L", stop=close - i_stopPts, limit=close + i_tpPts)
 
-longSignal = sweepLow and canTrade
-shortSignal = sweepHigh and canTrade
+// Short on high sweep
+if sweepHigh and lastSweepCycle != cycleNum
+    lastSweepCycle := cycleNum
+    strategy.entry("S", strategy.short)
+    strategy.exit("S_Exit", "S", stop=close + i_stopPts, limit=close - i_tpPts)
 
-if longSignal
-    tradedThisCycle := true
-    strategy.entry("Long", strategy.long)
-
-if shortSignal
-    tradedThisCycle := true
-    strategy.entry("Short", strategy.short)
-
-//------------------------------------------------------------------------------
-// EXITS
-//------------------------------------------------------------------------------
-if strategy.position_size > 0
-    strategy.exit("XL", "Long",
-         stop=strategy.position_avg_price - i_stopPts,
-         limit=strategy.position_avg_price + i_tpPts)
-
-if strategy.position_size < 0
-    strategy.exit("XS", "Short",
-         stop=strategy.position_avg_price + i_stopPts,
-         limit=strategy.position_avg_price - i_tpPts)
-
-// Close at end of day
-if not inSession and strategy.position_size != 0
-    strategy.close_all("EOD")
+// EOD flat
+if not inSession
+    strategy.close_all()
 
 //------------------------------------------------------------------------------
-// VISUALS
+// PLOTS
 //------------------------------------------------------------------------------
-plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
-plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
-plot(inPhase2 and validRange ? rangeHigh : na, "40m High", color.red, 2)
-plot(inPhase2 and validRange ? rangeLow : na, "40m Low", color.green, 2)
+plotshape(sweepLow and lastSweepCycle[1] != cycleNum, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(sweepHigh and lastSweepCycle[1] != cycleNum, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+plot(inPhase2 and validRange ? rangeHigh : na, "High", color.red, 2)
+plot(inPhase2 and validRange ? rangeLow : na, "Low", color.green, 2)
 bgcolor(inPhase1 ? color.new(color.yellow, 90) : inPhase2 ? color.new(color.blue, 93) : na)
+
+// Debug
+plot(cycleNum, "Cycle", display=display.data_window)
+plot(lastSweepCycle, "LastSweep", display=display.data_window)

@@ -2,9 +2,10 @@
 strategy("80m Cycles Strategy", overlay=true,
      default_qty_type=strategy.fixed,
      default_qty_value=1,
-     initial_capital=10000,
+     initial_capital=1000000,
      pyramiding=1,
-     process_orders_on_close=true)
+     process_orders_on_close=true,
+     currency=currency.USD)
 
 //------------------------------------------------------------------------------
 // INPUTS

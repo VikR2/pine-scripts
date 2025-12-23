@@ -1,0 +1,93 @@
+//@version=6
+strategy("80m Cycles Strategy", overlay=true,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     initial_capital=1000000,
+     pyramiding=1,
+     process_orders_on_close=true,
+     currency=currency.USD)
+
+//------------------------------------------------------------------------------
+// INPUTS
+//------------------------------------------------------------------------------
+i_startHour = input.int(7, "Session Start Hour", minval=0, maxval=23)
+i_endHour = input.int(16, "Session End Hour", minval=0, maxval=23)
+i_stopPts = input.float(30.0, "Stop Loss (points)", minval=1)
+i_tpPts = input.float(70.0, "Take Profit (points)", minval=1)
+i_tz = "America/New_York"
+
+//------------------------------------------------------------------------------
+// TIME CALCULATIONS
+//------------------------------------------------------------------------------
+currentHour = hour(time, i_tz)
+currentMin = minute(time, i_tz)
+inSession = currentHour >= i_startHour and currentHour < i_endHour
+
+totalMins = inSession ? (currentHour - i_startHour) * 60 + currentMin : -1
+cycleMin = totalMins >= 0 ? totalMins % 80 : -1
+
+inPhase1 = inSession and cycleMin >= 0 and cycleMin < 40
+inPhase2 = inSession and cycleMin >= 40
+
+enteringPhase1 = inPhase1 and not inPhase1[1]
+
+//------------------------------------------------------------------------------
+// RANGE TRACKING
+//------------------------------------------------------------------------------
+var float rangeHigh = na
+var float rangeLow = na
+
+if enteringPhase1
+    rangeHigh := high
+    rangeLow := low
+
+if inPhase1
+    rangeHigh := math.max(nz(rangeHigh, high), high)
+    rangeLow := math.min(nz(rangeLow, low), low)
+
+//------------------------------------------------------------------------------
+// SIGNALS - SIMPLIFIED
+//------------------------------------------------------------------------------
+validRange = not na(rangeHigh) and not na(rangeLow)
+sweepHigh = inPhase2 and validRange and high > rangeHigh
+sweepLow = inPhase2 and validRange and low < rangeLow
+
+// Track sweeps per cycle to avoid multiple entries
+var int lastSweepCycle = -1
+cycleNum = inSession ? math.floor(totalMins / 80) : -1
+newCycle = cycleNum != cycleNum[1]
+
+if newCycle
+    lastSweepCycle := -1
+
+//------------------------------------------------------------------------------
+// STRATEGY - DIRECT ENTRY ON SWEEP
+//------------------------------------------------------------------------------
+// Long on low sweep
+if sweepLow and lastSweepCycle != cycleNum
+    lastSweepCycle := cycleNum
+    strategy.entry("L", strategy.long)
+    strategy.exit("L_Exit", "L", stop=close - i_stopPts, limit=close + i_tpPts)
+
+// Short on high sweep
+if sweepHigh and lastSweepCycle != cycleNum
+    lastSweepCycle := cycleNum
+    strategy.entry("S", strategy.short)
+    strategy.exit("S_Exit", "S", stop=close + i_stopPts, limit=close - i_tpPts)
+
+// EOD flat
+if not inSession
+    strategy.close_all()
+
+//------------------------------------------------------------------------------
+// PLOTS
+//------------------------------------------------------------------------------
+plotshape(sweepLow and lastSweepCycle[1] != cycleNum, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(sweepHigh and lastSweepCycle[1] != cycleNum, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+plot(inPhase2 and validRange ? rangeHigh : na, "High", color.red, 2)
+plot(inPhase2 and validRange ? rangeLow : na, "Low", color.green, 2)
+bgcolor(inPhase1 ? color.new(color.yellow, 90) : inPhase2 ? color.new(color.blue, 93) : na)
+
+// Debug
+plot(cycleNum, "Cycle", display=display.data_window)
+plot(lastSweepCycle, "LastSweep", display=display.data_window)

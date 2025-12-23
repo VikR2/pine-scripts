@@ -3,9 +3,7 @@ strategy("80m Cycles Strategy", overlay=true,
      default_qty_type=strategy.fixed,
      default_qty_value=1,
      initial_capital=10000,
-     pyramiding=0,
-     calc_on_every_tick=false,
-     max_bars_back=500)
+     pyramiding=0)
 
 //------------------------------------------------------------------------------
 // INPUTS
@@ -17,113 +15,87 @@ i_tpPts = input.float(70.0, "Take Profit (points)", minval=1)
 i_tz = "America/New_York"
 
 //------------------------------------------------------------------------------
-// TIME FUNCTIONS
+// TIME CALCULATIONS
 //------------------------------------------------------------------------------
-f_inSession() =>
-    h = hour(time, i_tz)
-    h >= i_startHour and h < i_endHour
+currentHour = hour(time, i_tz)
+currentMin = minute(time, i_tz)
+inSession = currentHour >= i_startHour and currentHour < i_endHour
 
-f_getCyclePhase() =>
-    // Returns: 0=outside, 1=accumulation, 2=execution
-    if not f_inSession()
-        0
-    else
-        h = hour(time, i_tz)
-        m = minute(time, i_tz)
-        totalMins = (h - i_startHour) * 60 + m
-        cycleMin = totalMins % 80
-        cycleMin < 40 ? 1 : 2
+// Calculate cycle phase using modulo
+totalMins = inSession ? (currentHour - i_startHour) * 60 + currentMin : -1
+cycleMin = totalMins >= 0 ? totalMins % 80 : -1
 
-//------------------------------------------------------------------------------
-// PHASE TRACKING
-//------------------------------------------------------------------------------
-phase = f_getCyclePhase()
-inAccum = phase == 1
-inExec = phase == 2
+inPhase1 = inSession and cycleMin >= 0 and cycleMin < 40   // Accumulation
+inPhase2 = inSession and cycleMin >= 40                      // Execution
 
-// Detect phase transitions
-wasAccum = inAccum[1] or (phase[1] == 0 and inAccum)
-justEnteredExec = inExec and not inExec[1]
-justEnteredAccum = inAccum and not inAccum[1]
+// Detect phase changes
+enteringPhase1 = inPhase1 and not inPhase1[1]
+enteringPhase2 = inPhase2 and not inPhase2[1]
 
 //------------------------------------------------------------------------------
-// RANGE TRACKING - Using ta.highest/ta.lowest with lookback
+// RANGE TRACKING (Manual - no ta.highest/lowest)
 //------------------------------------------------------------------------------
-// Count bars in current accumulation phase
-var int accumBars = 0
-if justEnteredAccum
-    accumBars := 1
-else if inAccum
-    accumBars := accumBars + 1
-else if justEnteredExec
-    accumBars := accumBars  // Keep the count
-else if not inExec
-    accumBars := 0
-
-// Get range from accumulation period (cap at 50 to avoid buffer issues)
-lookback = math.min(math.max(1, accumBars), 50)
-accumHigh = ta.highest(high, lookback)
-accumLow = ta.lowest(low, lookback)
-
-// Lock in values at phase transition
 var float rangeHigh = na
 var float rangeLow = na
 
-if justEnteredExec
-    rangeHigh := accumHigh[1]
-    rangeLow := accumLow[1]
+if enteringPhase1
+    rangeHigh := high
+    rangeLow := low
+
+if inPhase1
+    rangeHigh := math.max(nz(rangeHigh, high), high)
+    rangeLow := math.min(nz(rangeLow, low), low)
 
 //------------------------------------------------------------------------------
 // SWEEP DETECTION
 //------------------------------------------------------------------------------
-sweepHigh = inExec and not na(rangeHigh) and high > rangeHigh
-sweepLow = inExec and not na(rangeLow) and low < rangeLow
+validRange = not na(rangeHigh) and not na(rangeLow)
+sweepHigh = inPhase2 and validRange and high > rangeHigh
+sweepLow = inPhase2 and validRange and low < rangeLow
 
-// Track if we already traded this cycle
+// One trade per cycle
 var bool tradedThisCycle = false
-if justEnteredAccum or justEnteredExec
+if enteringPhase1
     tradedThisCycle := false
 
 //------------------------------------------------------------------------------
-// STRATEGY LOGIC
+// STRATEGY ENTRIES
 //------------------------------------------------------------------------------
-longCondition = sweepLow and not tradedThisCycle and strategy.position_size == 0
-shortCondition = sweepHigh and not tradedThisCycle and strategy.position_size == 0
+canTrade = not tradedThisCycle and strategy.position_size == 0
 
-if longCondition
+longSignal = sweepLow and canTrade
+shortSignal = sweepHigh and canTrade
+
+if longSignal
     tradedThisCycle := true
     strategy.entry("Long", strategy.long)
 
-if shortCondition
+if shortSignal
     tradedThisCycle := true
     strategy.entry("Short", strategy.short)
 
-// Exit logic using strategy.position_avg_price
+//------------------------------------------------------------------------------
+// EXITS
+//------------------------------------------------------------------------------
 if strategy.position_size > 0
-    stopPrice = strategy.position_avg_price - i_stopPts
-    tpPrice = strategy.position_avg_price + i_tpPts
-    strategy.exit("Exit Long", "Long", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XL", "Long",
+         stop=strategy.position_avg_price - i_stopPts,
+         limit=strategy.position_avg_price + i_tpPts)
 
 if strategy.position_size < 0
-    stopPrice = strategy.position_avg_price + i_stopPts
-    tpPrice = strategy.position_avg_price - i_tpPts
-    strategy.exit("Exit Short", "Short", stop=stopPrice, limit=tpPrice)
+    strategy.exit("XS", "Short",
+         stop=strategy.position_avg_price + i_stopPts,
+         limit=strategy.position_avg_price - i_tpPts)
 
-// Close at end of session
-if not f_inSession() and strategy.position_size != 0
-    strategy.close_all("Session Close")
+// Close at end of day
+if not inSession and strategy.position_size != 0
+    strategy.close_all("EOD")
 
 //------------------------------------------------------------------------------
-// PLOTS
+// VISUALS
 //------------------------------------------------------------------------------
-plotshape(longCondition, "Long Signal", shape.triangleup, location.belowbar, color.lime, size=size.small)
-plotshape(shortCondition, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
-
-plot(inExec ? rangeHigh : na, "Range High", color.red, 2)
-plot(inExec ? rangeLow : na, "Range Low", color.green, 2)
-
-bgcolor(inAccum ? color.new(color.yellow, 90) : inExec ? color.new(color.blue, 90) : na)
-
-// Debug info
-plotchar(sweepLow, "Sweep Low", "▼", location.abovebar, color.green, size=size.tiny)
-plotchar(sweepHigh, "Sweep High", "▲", location.belowbar, color.red, size=size.tiny)
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+plot(inPhase2 and validRange ? rangeHigh : na, "40m High", color.red, 2)
+plot(inPhase2 and validRange ? rangeLow : na, "40m Low", color.green, 2)
+bgcolor(inPhase1 ? color.new(color.yellow, 90) : inPhase2 ? color.new(color.blue, 93) : na)
